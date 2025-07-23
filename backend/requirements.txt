@@ -1,0 +1,13 @@
+# backend/requirements.txt
+
+# Core web framework for building the API
+fastapi
+
+# ASGI server for running the FastAPI application
+uvicorn
+
+# Main Pipecat package with extras for Google services and WebSocket transport
+pipecat-ai[google,websocket]
+
+# Used for loading environment variables from a .env file for secure API key management
+python-dotenv
