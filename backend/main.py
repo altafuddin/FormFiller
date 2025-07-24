@@ -27,7 +27,13 @@ from pipecat.services.gemini_multimodal_live.gemini import (
     GeminiMultimodalModalities,
 )
 from pipecat.serializers.protobuf import ProtobufFrameSerializer
-
+from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
+from form_tools import (
+    tools,
+    handle_open_form,
+    handle_update_field,
+    handle_submit_form,
+)
 
 # Load environment variables from .env file
 load_dotenv()
@@ -38,9 +44,10 @@ app = FastAPI()
 @app.websocket("/voice")
 async def websocket_endpoint(websocket: WebSocket):
     """
-    This endpoint accepts a WebSocket connection, sets up a Pipecat pipeline,
-    and runs the real-time voice-to-voice Gemini agent.
+    This endpoint runs the real-time voice agent with function calling capabilities
+    and proper conversation context management.
     """
+    # Accept the WebSocket connection
     await websocket.accept()
 
     # Create an instance of the serializer to ensure frontend and backend
@@ -57,10 +64,8 @@ async def websocket_endpoint(websocket: WebSocket):
             serializer=serializer,
         )
     )
-
-    # Design Choice: Instantiate the Gemini Live service. This is the core
-    # of our agent. We use environment variables for the API key for security.
-    # EVIDENCE: Instantiation verified from the Gemini Multimodal Live docs.
+    
+    # Initialize the Gemini service with the API key and input parameters.
     # The GOOGLE_API_KEY environment variable is required.
     api_key = os.getenv("GOOGLE_API_KEY")
     if api_key is None:
@@ -69,16 +74,50 @@ async def websocket_endpoint(websocket: WebSocket):
         api_key=api_key,
         params=InputParams(
             modalities=GeminiMultimodalModalities.AUDIO
-        )
+        ),
+        tools=tools,  # Register custom tools with the Gemini service
     )
     
-    
-    # Assemble the pipeline.
-    # The flow is: User Audio -> Transport -> Gemini -> Transport -> User
+    # Each tool is registered with its corresponding handler function.
+    gemini_service.register_function("open_form", handle_open_form)
+    gemini_service.register_function("update_field", handle_update_field)
+    gemini_service.register_function("submit_form", handle_submit_form)
+
+    # The context object is created, passing both the initial messages and the tools.
+    # This prompt is explicit about maintaining a state and handling the conversation flow.
+    context = OpenAILLMContext(
+        messages=[
+        {
+            "role": "system",
+            "content": (
+                "You are a voice assistant that helps users fill out a form. "
+                "Your primary goal is to collect information and use your tools to update the form fields. "
+                "Wait for the user to speak first."
+                "The user will provide information piece by piece. After each piece of information, you MUST call the appropriate tool. "
+                "Follow these steps:\n"
+                "1. When the user wants to start or open a form, call `open_form`.\n"
+                "2. For each piece of data the user provides (like name, email, etc.), you MUST call the `update_field` tool.\n"
+                "3. Acknowledge every successful tool call with a brief confirmation (e.g., 'Got it, what's next?').\n"
+                "4. Continue asking for the next piece of information until the user says to submit.\n"
+                "5. When the user says 'submit' or 'I'm done', you MUST call the `submit_form` tool.\n"
+                "Do not stop calling tools until the `submit_form` tool has been called."
+            ),
+        }
+    ],
+    tools=tools)
+
+    # A context aggregator is created from the LLM service and the context object.
+    context_aggregator = gemini_service.create_context_aggregator(context)
+
+
+    # The pipeline is updated to include the context_aggregator's user and assistant processors.
+    # This ensures the conversation history is maintained correctly.
     pipeline = Pipeline([
         transport.input(),
+        context_aggregator.user(),
         gemini_service,
         transport.output(),
+        context_aggregator.assistant(),
     ])
 
     # Create a task to run the pipeline.

@@ -211,3 +211,8 @@ __marimo__/
 # roughs
 roughs/
 output*
+
+# nextjs
+.next/ 
+next-env.d.ts
+tsconfig.json
