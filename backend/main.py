@@ -4,12 +4,13 @@
 Main application file for the Pipecat real-time voice agent.
 This script sets up a FastAPI server with a WebSocket endpoint that runs a
 Pipecat pipeline, connecting a client to the Google Gemini Live API for a
-real-time, voice-to-voice conversation.
+real-time, voice-to-voice conversation with tool-using capabilities.
 """
 
 # Standard library and dependency imports
 import os
 import uvicorn
+import functools
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket
 
@@ -26,8 +27,10 @@ from pipecat.services.gemini_multimodal_live.gemini import (
     InputParams,
     GeminiMultimodalModalities,
 )
+from pipecat.transcriptions.language import Language
 from pipecat.serializers.protobuf import ProtobufFrameSerializer
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
+from pipecat.processors.frameworks.rtvi import RTVIProcessor, RTVIConfig, RTVIObserver
 from form_tools import (
     tools,
     handle_open_form,
@@ -37,6 +40,32 @@ from form_tools import (
 
 # Load environment variables from .env file
 load_dotenv()
+
+# This prompt is engineered to provide a clear, rules-based workflow for the LLM.
+SYSTEM_PROMPT = """
+You are a friendly and helpful voice assistant. Your primary goal is to help users fill out a 'registration' form.
+
+
+[RULES]
+1.  When the user first indicates they want to sign up or register, your first and only action is to call the `open_form` tool with `form_type` set to "registration".
+2.  Check status if the form opened, if successfully the form is open, you will ask for the user's full name.
+3.  When the user provides their name, you MUST call the `update_field` tool with `field_name` as "name" and `field_value` as the user's provided name.
+4.  After the name is updated by calling the `update_field` tool, you will ask for their email address.
+5.  When the user provides their email, you MUST call the `update_field` tool with `field_name` as "email" and `field_value` as the user's provided email.
+6.  After the email is updated by calling the `update_field` tool, you will ask for their phone number.
+7.  When the user provides their phone number, you MUST call the `update_field` tool with `field_name` as "phone_number" and `field_value` as the user's provided phone number.
+8.  After the phone number is updated by calling the `update_field` tool, you MUST ask the user to confirm if they want to submit the form.
+9.  If and only if the user confirms, you MUST call the `submit_form` tool.
+
+Always check for these keywords in user responses:
+- "register", "sign up", "create account" - indicates the user wants to fill out the registration form, call the open_form tool.
+- "name", "full name" - indicates the user is providing their name, call the update_field tool with "name" as the field name.
+- "email", "email address" - indicates the user is providing their email, call the update_field tool with "email" as the field name.
+- "phone", "phone number" - indicates the user is providing their phone number, call the update_field tool with "phone_number" as the field name.
+- "submit", "finish", "done" - indicates the user wants to submit the form, call the submit_form tool.
+
+If the user is not trying to fill out a form, just have a normal, friendly conversation.
+"""
 
 # Initialize the FastAPI application
 app = FastAPI()
@@ -65,63 +94,91 @@ async def websocket_endpoint(websocket: WebSocket):
         )
     )
     
-    # Initialize the Gemini service with the API key and input parameters.
+    # The RTVIProcessor handles custom messaging between the backend and frontend.
+    rtvi = RTVIProcessor(
+        config=RTVIConfig(config=[]),
+        transport=transport
+    )
+
     # The GOOGLE_API_KEY environment variable is required.
     api_key = os.getenv("GOOGLE_API_KEY")
     if api_key is None:
         raise RuntimeError("GOOGLE_API_KEY environment variable is not set.")
+    
+    # Initialize the Gemini service, passing the system prompt and tool definitions.
     gemini_service = GeminiMultimodalLiveLLMService(
         api_key=api_key,
         params=InputParams(
-            modalities=GeminiMultimodalModalities.AUDIO
+            language=Language.EN_US,
+            modalities=GeminiMultimodalModalities.AUDIO,
+            temperature=0.6,  # Adjust temperature for response variability
         ),
         tools=tools,  # Register custom tools with the Gemini service
+        system_instruction=SYSTEM_PROMPT,
+        inference_on_context_initialization=True # ensure the service continues processing
     )
+
+    # Register event handlers for function calls to log their start and completion.
+    @gemini_service.event_handler("on_function_calls_started")
+    async def on_function_calls_started(service, function_calls):
+        print(f"Function calls started: {[fc.function_name for fc in function_calls]}")
+
+    @gemini_service.event_handler("on_function_calls_finished") 
+    async def on_function_calls_finished(service, function_calls):
+        print(f"Function calls finished: {[fc.function_name for fc in function_calls]}")
     
+
+    # `functools.partial` creates new handler functions with the `rtvi` instance
+    # pre-filled as the first argument, giving them access to the UI message channel.
+    open_form_handler = functools.partial(handle_open_form, rtvi)
+    update_field_handler = functools.partial(handle_update_field, rtvi)
+    submit_form_handler = functools.partial(handle_submit_form, rtvi)
+
     # Each tool is registered with its corresponding handler function.
-    gemini_service.register_function("open_form", handle_open_form)
-    gemini_service.register_function("update_field", handle_update_field)
-    gemini_service.register_function("submit_form", handle_submit_form)
+    gemini_service.register_function("open_form", open_form_handler)
+    gemini_service.register_function("update_field", update_field_handler)
+    gemini_service.register_function("submit_form", submit_form_handler)
 
     # The context object is created, passing both the initial messages and the tools.
-    # This prompt is explicit about maintaining a state and handling the conversation flow.
     context = OpenAILLMContext(
-        messages=[
-        {
-            "role": "system",
-            "content": (
-                "You are a voice assistant that helps users fill out a form. "
-                "Your primary goal is to collect information and use your tools to update the form fields. "
-                "Wait for the user to speak first."
-                "The user will provide information piece by piece. After each piece of information, you MUST call the appropriate tool. "
-                "Follow these steps:\n"
-                "1. When the user wants to start or open a form, call `open_form`.\n"
-                "2. For each piece of data the user provides (like name, email, etc.), you MUST call the `update_field` tool.\n"
-                "3. Acknowledge every successful tool call with a brief confirmation (e.g., 'Got it, what's next?').\n"
-                "4. Continue asking for the next piece of information until the user says to submit.\n"
-                "5. When the user says 'submit' or 'I'm done', you MUST call the `submit_form` tool.\n"
-                "Do not stop calling tools until the `submit_form` tool has been called."
-            ),
-        }
+    messages=[
+        {"role": "system", "content": SYSTEM_PROMPT}
     ],
-    tools=tools)
+    tools=tools
+)
 
     # A context aggregator is created from the LLM service and the context object.
     context_aggregator = gemini_service.create_context_aggregator(context)
 
 
-    # The pipeline is updated to include the context_aggregator's user and assistant processors.
-    # This ensures the conversation history is maintained correctly.
+    # The pipeline defines the flow of data and processing
     pipeline = Pipeline([
-        transport.input(),
-        context_aggregator.user(),
-        gemini_service,
-        transport.output(),
-        context_aggregator.assistant(),
+        transport.input(),          # Receives audio from the client
+        rtvi,                       # Handles UI events
+        context_aggregator.user(),  # Adds user speech to context
+        gemini_service,             # Processes context and calls tools
+        transport.output(),         # Sends generated audio to the client
+        context_aggregator.assistant(), # Adds bot speech to context
     ])
 
-    # Create a task to run the pipeline.
-    task = PipelineTask(pipeline)
+    # The task wraps the pipeline and includes the RTVIObserver, which is
+    # essential for the RTVIProcessor to function correctly.
+    task = PipelineTask(
+        pipeline,
+        observers=[RTVIObserver(rtvi)]  # RTVIObserver to handle UI messages
+    )
+
+    # Event handlers manage the session lifecycle.
+    @rtvi.event_handler("on_client_ready")
+    async def on_client_ready(rtvi):
+        # This kicks off the conversation once the client is fully connected.
+        await rtvi.set_bot_ready()
+        # Kick off the conversation by sending the initial context (which is just the system prompt)
+        await task.queue_frames([context_aggregator.user().get_context_frame()])
+    
+    @transport.event_handler("on_client_disconnected")
+    async def on_client_disconnected(transport, client):
+        await task.cancel()
 
     # Create a runner and execute the task.
     # This starts the agent and keeps it running until disconnection.
