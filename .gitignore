@@ -215,4 +215,3 @@ output*
 # nextjs
 .next/ 
 next-env.d.ts
-tsconfig.json
