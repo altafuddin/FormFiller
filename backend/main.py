@@ -13,6 +13,7 @@ import uvicorn
 import functools
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket
+from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
 
 
@@ -61,6 +62,40 @@ ALWAYS call the tool when needed. Never just talk about doing it.
 # Initialize the FastAPI application
 app = FastAPI()
 
+
+# Add CORS middleware - IMPORTANT for Vercel frontend connection
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://*.vercel.app",  # Allow all Vercel domains temporarily
+        "https://*.onrender.com",  # Allow Render domains 
+        "http://localhost:3000",  # For local development
+        "https://localhost:3000",  # For local HTTPS development
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Add health check endpoint for deployment verification
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for deployment verification"""
+    return {"status": "healthy", "service": "voice-agent-backend"}
+
+@app.get("/performance-report")
+async def get_performance_report():
+    """Get current performance metrics"""
+    summary = enhanced_perf_tracker.get_performance_summary()
+    return {"performance_summary": summary, "timestamp": datetime.now().isoformat()}
+
+@app.post("/export-performance")
+async def export_performance_data():
+    """Export detailed performance data"""
+    enhanced_perf_tracker.export_data("performance_results.json")
+    return {"message": "Performance data exported to performance_results.json"}
+
+
 @app.websocket("/voice")
 async def websocket_endpoint(websocket: WebSocket):
     """
@@ -69,18 +104,6 @@ async def websocket_endpoint(websocket: WebSocket):
     """
     # Accept the WebSocket connection
     await websocket.accept()
-
-    @app.get("/performance-report")
-    async def get_performance_report():
-        """Get current performance metrics"""
-        summary = enhanced_perf_tracker.get_performance_summary()
-        return {"performance_summary": summary, "timestamp": datetime.now().isoformat()}
-
-    @app.post("/export-performance")
-    async def export_performance_data():
-        """Export detailed performance data"""
-        enhanced_perf_tracker.export_data("performance_results.json")
-        return {"message": "Performance data exported to performance_results.json"}
 
     # Create an instance of the serializer to ensure frontend and backend
     # are using the same data format.
@@ -106,8 +129,10 @@ async def websocket_endpoint(websocket: WebSocket):
     # The GOOGLE_API_KEY environment variable is required.
     api_key = os.getenv("GOOGLE_API_KEY")
     if api_key is None:
+        await websocket.close(code=1008, reason="Server configuration error")
         raise RuntimeError("GOOGLE_API_KEY environment variable is not set.")
-    
+        return
+
     # Initialize the Gemini service, passing the system prompt and tool definitions.
     gemini_service = GeminiMultimodalLiveLLMService(
         api_key=api_key,
@@ -192,5 +217,6 @@ async def websocket_endpoint(websocket: WebSocket):
 
 if __name__ == "__main__":
     # This block allows running the server directly from the script.
-    print("Starting FastAPI server for voice agent on http://localhost:8000")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.getenv("PORT", 8000))  # Use Render's PORT or fallback to 8000
+    print(f"Starting FastAPI server for voice agent on port {port}")
+    uvicorn.run(app, host="0.0.0.0", port=port)

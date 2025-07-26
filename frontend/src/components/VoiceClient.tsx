@@ -107,6 +107,10 @@ export default function VoiceClient() {
     const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
     const [formFields, setFormFields] = useState<FormField[] | null>(null);
     const [formValues, setFormValues] = useState<Record<string, string>>({});
+    const [performanceMetrics, setPerformanceMetrics] = useState({
+        connectionTimes: [],
+        uiUpdateTimes: []
+    });
 
     const pipecatUrl = process.env.NEXT_PUBLIC_PIPECAT_URL || "ws://localhost:8000/voice";
 
@@ -164,12 +168,21 @@ export default function VoiceClient() {
     const handleConnect = async () => {
         if (!client.current) return;
 
+        const connectionStart = performance.now();
         setConnectionState("connecting");
 
         try {
             await client.current.connect({
                 ws_url: pipecatUrl,
             });
+
+            const connectionTime = performance.now() - connectionStart;
+            console.log(`🔗 Connection established in ${connectionTime.toFixed(1)}ms`);
+
+            setPerformanceMetrics(prev => ({
+                ...prev,
+                connectionTimes: [...prev.connectionTimes, connectionTime]
+            }));
         } catch (error) {
             console.error("Connection failed:", error);
             setConnectionState("error");
