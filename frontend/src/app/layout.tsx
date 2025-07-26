@@ -1,8 +1,9 @@
+import './globals.css'
 import type { Metadata } from 'next'
 
 export const metadata: Metadata = {
-  title: 'FormFiller - AI Voice Agent',
-  description: 'Ultra-low latency AI voice-controlled form filling',
+  title: 'Voice Form Filler',
+  description: 'Fill forms using voice commands',
 }
 
 export default function RootLayout({
