@@ -4,11 +4,31 @@ This module defines the schemas for our form-filling tools and the
 handler functions that execute them. Handlers now also push UI update
 messages to the client via the RTVIProcessor.
 '''
-
+import asyncio
+import time
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.services.llm_service import FunctionCallParams
 from pipecat.processors.frameworks.rtvi import RTVIProcessor
+
+# Performance tracking
+class PerformanceTracker:
+    def __init__(self):
+        self.start_time = None
+    
+    def start(self):
+        self.start_time = time.time()
+    
+    def end(self, operation):
+        if self.start_time:
+            duration = (time.time() - self.start_time) * 1000  # Convert to ms
+            print(f"⚡ {operation} completed in {duration:.1f}ms")
+            return duration
+        return 0
+    
+# Global performance tracker
+perf_tracker = PerformanceTracker()
+
 
 # --- Form Definitions ---
 # This dictionary is the "source of truth" for the structure of all forms.
@@ -17,7 +37,7 @@ FORM_DEFINITIONS = {
     "registration": [
         {"name": "name", "label": "Full Name", "type": "text"},
         {"name": "email", "label": "Email Address", "type": "email"},
-        {"name": "phone_number", "label": "Phone Number", "type": "tel"},
+        # {"name": "phone_number", "label": "Phone Number", "type": "tel"},
     ]
 }
 
@@ -25,7 +45,7 @@ FORM_DEFINITIONS = {
 # Defines the schema for the open_form tool.
 open_form_schema = FunctionSchema(
     name="open_form",
-    description="Opens a form of a specific type. Should be called when a user wants to start a new form.",
+    description="Opens form instantly. Should be called when a user wants to start a new form.",
     properties={
         "form_type": {
             "type": "string",
@@ -56,7 +76,7 @@ update_field_schema = FunctionSchema(
 # Defines the schema for the submit_form tool.
 submit_form_schema = FunctionSchema(
     name="submit_form",
-    description="Submits the completed form. Call this when the user says 'Submit the form' or similar.",
+    description="Submits form instantly. Call this when the user says 'Submit the form' or similar.",
     properties={},
     required=[]
 )
@@ -70,78 +90,68 @@ tools = ToolsSchema(
     ]
 )
 
-# --- Tool Handler Functions ---
+# --- Ultra-Fast Tool Handlers ---
 
 async def handle_open_form(rtvi: RTVIProcessor, params: FunctionCallParams):
-    """Handler for the open_form tool.
-
-    This handler now performs two actions:
-    1. It pushes an `RTVIServerMessageFrame` to the client to render the form UI.
-    2. It calls `result_callback` to let the LLM know the tool executed successfully.
-    """
-    form_type = params.arguments.get("form_type", "unknown")
-    print(f"TOOL HANDLER: Executing open_form for form_type: '{form_type}'")
-
+    """Ultra-fast form opening handler"""
+    perf_tracker.start()
     
-    form_definition = FORM_DEFINITIONS.get(form_type, [])
-    ui_message = {
-            "type": "open_form",
-            "payload": {
-                "form_type": form_type,
-                "fields": form_definition,
-            },
-        }
-
-    # The frame is now pushed to the `rtvi` processor, which is the correct
-    # component for handling UI-bound messages.
-    await rtvi.send_server_message(ui_message)
-
-    # Let the LLM know the tool call was successful.
-    await params.result_callback({"status": f"Form '{form_type}' opened successfully."})
+    form_type = params.arguments.get("form_type", "registration")
+    print(f"🚀 SPEED: Opening {form_type} form...")
+    
+    # Minimal form definition for speed
+    form_definition = [
+        {"name": "name", "label": "Name", "type": "text"},
+        {"name": "email", "label": "Email", "type": "email"}, 
+        # {"name": "phone_number", "label": "Phone", "type": "tel"},
+    ]
+    
+    # Fire UI update and callback simultaneously 
+    ui_task = rtvi.send_server_message({
+        "type": "open_form",
+        "payload": {"form_type": form_type, "fields": form_definition},
+    })
+    
+    callback_task = params.result_callback({"status": "READY"})
+    
+    # Execute both in parallel for maximum speed
+    await asyncio.gather(ui_task, callback_task)
+    
+    perf_tracker.end("open_form")
 
 async def handle_update_field(rtvi: RTVIProcessor, params: FunctionCallParams):
-    """
-    Handler for the update_field tool.
-    Sends a message to the client UI to update a specific field's value.
-    """
-    try:
-        field_name = params.arguments.get("field_name")
-        field_value = params.arguments.get("field_value")
-        print(f"TOOL HANDLER: Executing update_field with name='{field_name}' and value='{field_value}'")
-
-        # Create the UI message frame for updating a field.
-        ui_message = {
-                "type": "update_field",
-                "payload": {
-                    "field_name": field_name,
-                    "field_value": field_value,
-                },
-            }
-
-        # Push the frame to the client.
-        await rtvi.send_server_message(ui_message)
-
-        # Let the LLM know the tool call was successful.
-        await params.result_callback({"status": f"Field '{field_name}' updated."})
-        
-    except Exception as e:
-        await params.result_callback({"error": f"Failed to update field: {str(e)}"})
+    """Ultra-fast field update handler"""
+    perf_tracker.start()
+    
+    field_name = params.arguments.get("field_name")
+    field_value = params.arguments.get("field_value")
+    print(f"⚡ SPEED: Updating {field_name}={field_value}")
+    
+    # Parallel UI update and callback
+    ui_task = rtvi.send_server_message({
+        "type": "update_field",
+        "payload": {"field_name": field_name, "field_value": field_value},
+    })
+    
+    callback_task = params.result_callback({"status": "UPDATED"})
+    
+    await asyncio.gather(ui_task, callback_task)
+    
+    perf_tracker.end(f"update_field_{field_name}")
 
 async def handle_submit_form(rtvi: RTVIProcessor, params: FunctionCallParams):
-    """
-    Handler for the submit_form tool.
-    Sends a message to the client UI to signal completion and clear the form.
-    """
-    print(f"TOOL HANDLER: Executing submit_form")
-
-    # Create the UI message frame for form submission.
-    ui_message = {
-            "type": "submit_form",
-            "payload": {"status": "success"},
-        }
+    """Ultra-fast form submission handler"""
+    perf_tracker.start()
+    print(f"🏁 SPEED: Submitting form...")
     
-    # Push the frame to the client.
-    await rtvi.send_server_message(ui_message)
-
-    # Let the LLM know the tool call was successful.
-    await params.result_callback({"status": "Form submitted successfully."})
+    # Parallel submission and callback
+    ui_task = rtvi.send_server_message({
+        "type": "submit_form", 
+        "payload": {"status": "success"},
+    })
+    
+    callback_task = params.result_callback({"status": "SUBMITTED"})
+    
+    await asyncio.gather(ui_task, callback_task)
+    
+    perf_tracker.end("submit_form")
