@@ -6,28 +6,82 @@ messages to the client via the RTVIProcessor.
 '''
 import asyncio
 import time
+from collections import defaultdict
+from datetime import datetime
+import statistics
+import json
+
+# Pipecat imports
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.services.llm_service import FunctionCallParams
 from pipecat.processors.frameworks.rtvi import RTVIProcessor
 
 # Performance tracking
-class PerformanceTracker:
+class AdvancedPerformanceTracker:
     def __init__(self):
-        self.start_time = None
+        self.metrics = defaultdict(list)
+        self.voice_latency_data = []
+        
+    def start_voice_interaction(self):
+        return time.time()
     
-    def start(self):
-        self.start_time = time.time()
-    
-    def end(self, operation):
-        if self.start_time:
-            duration = (time.time() - self.start_time) * 1000  # Convert to ms
-            print(f"⚡ {operation} completed in {duration:.1f}ms")
-            return duration
+    def end_voice_interaction(self, start_time, interaction_type="general"):
+        if start_time:
+            latency_ms = (time.time() - start_time) * 1000
+            self.voice_latency_data.append({
+                'timestamp': datetime.now().isoformat(),
+                'type': interaction_type,
+                'latency_ms': latency_ms
+            })
+            print(f"🎙️ Voice-to-Voice {interaction_type}: {latency_ms:.1f}ms")
+            return latency_ms
         return 0
     
-# Global performance tracker
-perf_tracker = PerformanceTracker()
+    def track_tool_performance(self, tool_name, duration_ms):
+        self.metrics[tool_name].append(duration_ms)
+        print(f"⚡ {tool_name} completed in {duration_ms:.1f}ms")
+    
+    def get_performance_summary(self):
+        summary = {}
+        
+        for tool_name, durations in self.metrics.items():
+            if durations:
+                summary[tool_name] = {
+                    'count': len(durations),
+                    'avg_ms': statistics.mean(durations),
+                    'median_ms': statistics.median(durations),
+                    'min_ms': min(durations),
+                    'max_ms': max(durations),
+                    'p95_ms': statistics.quantiles(durations, n=20)[18] if len(durations) > 5 else max(durations)
+                }
+        
+        if self.voice_latency_data:
+            latencies = [d['latency_ms'] for d in self.voice_latency_data]
+            summary['voice_to_voice'] = {
+                'count': len(latencies),
+                'avg_ms': statistics.mean(latencies),
+                'median_ms': statistics.median(latencies),
+                'p95_ms': statistics.quantiles(latencies, n=20)[18] if len(latencies) > 5 else max(latencies),
+                'under_500ms': sum(1 for l in latencies if l < 500) / len(latencies) * 100
+            }
+        
+        return summary
+    
+    def export_data(self, filename="performance_data.json"):
+        data = {
+            'metrics': dict(self.metrics),
+            'voice_latency': self.voice_latency_data,
+            'export_time': datetime.now().isoformat()
+        }
+        
+        with open(filename, 'w') as f:
+            json.dump(data, f, indent=2)
+        
+        print(f"📊 Data exported to {filename}")
+
+# Global performance tracker instance
+enhanced_perf_tracker = AdvancedPerformanceTracker()
 
 
 # --- Form Definitions ---
@@ -90,23 +144,22 @@ tools = ToolsSchema(
     ]
 )
 
-# --- Ultra-Fast Tool Handlers ---
+# --- Tool Handlers ---
 
 async def handle_open_form(rtvi: RTVIProcessor, params: FunctionCallParams):
-    """Ultra-fast form opening handler"""
-    perf_tracker.start()
+    """"Handles the open_form tool call by sending a UI update message to the client
+    and returning a result callback."""
+    start_time = time.time()
+    voice_start = enhanced_perf_tracker.start_voice_interaction()
     
     form_type = params.arguments.get("form_type", "registration")
-    print(f"🚀 SPEED: Opening {form_type} form...")
+    print(f"🚀 Opening {form_type} form...")
     
-    # Minimal form definition for speed
     form_definition = [
         {"name": "name", "label": "Name", "type": "text"},
         {"name": "email", "label": "Email", "type": "email"}, 
-        # {"name": "phone_number", "label": "Phone", "type": "tel"},
     ]
     
-    # Fire UI update and callback simultaneously 
     ui_task = rtvi.send_server_message({
         "type": "open_form",
         "payload": {"form_type": form_type, "fields": form_definition},
@@ -114,20 +167,21 @@ async def handle_open_form(rtvi: RTVIProcessor, params: FunctionCallParams):
     
     callback_task = params.result_callback({"status": "READY"})
     
-    # Execute both in parallel for maximum speed
     await asyncio.gather(ui_task, callback_task)
     
-    perf_tracker.end("open_form")
+    tool_duration = (time.time() - start_time) * 1000
+    enhanced_perf_tracker.track_tool_performance("open_form", tool_duration)
+    enhanced_perf_tracker.end_voice_interaction(voice_start, "form_opening")
 
 async def handle_update_field(rtvi: RTVIProcessor, params: FunctionCallParams):
-    """Ultra-fast field update handler"""
-    perf_tracker.start()
+    """Handles the update_field tool call by sending a UI update message to the client
+    and returning a result callback."""
+    start_time = time.time()
+    voice_start = enhanced_perf_tracker.start_voice_interaction()
     
     field_name = params.arguments.get("field_name")
     field_value = params.arguments.get("field_value")
-    print(f"⚡ SPEED: Updating {field_name}={field_value}")
     
-    # Parallel UI update and callback
     ui_task = rtvi.send_server_message({
         "type": "update_field",
         "payload": {"field_name": field_name, "field_value": field_value},
@@ -137,14 +191,18 @@ async def handle_update_field(rtvi: RTVIProcessor, params: FunctionCallParams):
     
     await asyncio.gather(ui_task, callback_task)
     
-    perf_tracker.end(f"update_field_{field_name}")
+    tool_duration = (time.time() - start_time) * 1000
+    enhanced_perf_tracker.track_tool_performance(f"update_field_{field_name}", tool_duration)
+    enhanced_perf_tracker.end_voice_interaction(voice_start, f"field_update_{field_name}")
 
 async def handle_submit_form(rtvi: RTVIProcessor, params: FunctionCallParams):
-    """Ultra-fast form submission handler"""
-    perf_tracker.start()
-    print(f"🏁 SPEED: Submitting form...")
+    """Handles the submit_form tool call by sending a UI update message to the client
+    and returning a result callback."""
+    start_time = time.time()
+    voice_start = enhanced_perf_tracker.start_voice_interaction()
     
-    # Parallel submission and callback
+    print(f"🏁 Submitting form...")
+    
     ui_task = rtvi.send_server_message({
         "type": "submit_form", 
         "payload": {"status": "success"},
@@ -154,4 +212,6 @@ async def handle_submit_form(rtvi: RTVIProcessor, params: FunctionCallParams):
     
     await asyncio.gather(ui_task, callback_task)
     
-    perf_tracker.end("submit_form")
+    tool_duration = (time.time() - start_time) * 1000
+    enhanced_perf_tracker.track_tool_performance("submit_form", tool_duration)
+    enhanced_perf_tracker.end_voice_interaction(voice_start, "form_submission")

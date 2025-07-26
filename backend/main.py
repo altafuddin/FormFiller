@@ -13,6 +13,8 @@ import uvicorn
 import functools
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket
+from datetime import datetime
+
 
 # Pipecat core and service imports
 from pipecat.pipeline.pipeline import Pipeline
@@ -36,6 +38,7 @@ from form_tools import (
     handle_open_form,
     handle_update_field,
     handle_submit_form,
+    enhanced_perf_tracker
 )
 
 # Load environment variables from .env file
@@ -43,27 +46,16 @@ load_dotenv()
 
 # Ultra-fast, direct action prompt optimized for speed
 SYSTEM_PROMPT = """
-You are a friendly voice assistant helping users register. Use tools properly, calmly, one step at a time.
-Do not open forms or submit until explicitly requested by the user.
+You are a friendly assistant. Chat normally until the user asks to register.
 
-Flow Rules:
+ONLY use tools when:
+1. User says "register" or "sign up" → Call open_form tool
+2. User gives name → Call update_field tool with field_name="name"  
+3. User gives email → Call update_field tool with field_name="email"
+4. User says "submit" → Call submit_form tool
 
-1. When user says “register” or similar → call **open_form(form_type="registration")**. After tool runs, say “Form opened. What’s your full name?”
-
-2. When user gives their name → call **update_field(field_name="name", field_value=[name])** immediately. Then ask for email.
-
-3.  User provides email → IMMEDIATELY call update_field(field_name="email", field_value="[email]")
-
-4. When user says "submit" or similar submission → you MUST call **submit_form()** exactly once. Then say “Done! Your registration is complete.”
-
-Important:
-• Always **CALL THE TOOL**, never just mention it being done. Such as saying "I have submitted your form" without calling **submit_form()**.
-• Always call **update_field()** immediately after user provides information.
-• Only proceed to the next step after tool confirmation.
-• Do not skip fields; don’t auto-fill or repeat.
-• If user gives wrong info (like saying email instead of name), gently remind: “We’re collecting your [current field]. Please provide that first.”
-If user shifts topic mid-form, gently remind: “We’re collecting your [current field], please continue.”
-If user talks about anything else outside of registration, respond normally and wait for valid trigger.
+DO NOT open forms automatically. Wait for the user to ask.
+ALWAYS call the tool when needed. Never just talk about doing it.
 """
 
 # Initialize the FastAPI application
@@ -77,6 +69,18 @@ async def websocket_endpoint(websocket: WebSocket):
     """
     # Accept the WebSocket connection
     await websocket.accept()
+
+    @app.get("/performance-report")
+    async def get_performance_report():
+        """Get current performance metrics"""
+        summary = enhanced_perf_tracker.get_performance_summary()
+        return {"performance_summary": summary, "timestamp": datetime.now().isoformat()}
+
+    @app.post("/export-performance")
+    async def export_performance_data():
+        """Export detailed performance data"""
+        enhanced_perf_tracker.export_data("performance_results.json")
+        return {"message": "Performance data exported to performance_results.json"}
 
     # Create an instance of the serializer to ensure frontend and backend
     # are using the same data format.
@@ -110,9 +114,9 @@ async def websocket_endpoint(websocket: WebSocket):
         params=InputParams(
             language=Language.EN_US,
             modalities=GeminiMultimodalModalities.AUDIO,
-            temperature=0.3,  # Adjust temperature for response variability
-            top_p=0.9,  # Top-p sampling for more controlled responses
-            top_k=40,  # Top-k sampling to limit response options
+            temperature=0.0,  # Adjust temperature for response variability
+            top_p=0.7,  # Top-p sampling for more controlled responses
+            top_k=10,  # Top-k sampling to limit response options
         ),
         tools=tools,  # Register custom tools with the Gemini service
         system_instruction=SYSTEM_PROMPT,
@@ -142,9 +146,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
     # The context object is created, passing both the initial messages and the tools.
     context = OpenAILLMContext(
-    messages=[
-        {"role": "system", "content": SYSTEM_PROMPT}
-    ],
+    messages=[],
     tools=tools
 )
 
